@@ -1,103 +1,95 @@
 import os
+import json
 import streamlit as st
 from dotenv import load_dotenv
 import pandas as pd
-
-# Airbyte/PyAirbyte
+import requests
 import airbyte as ab
 
-# Networking for MCP client
-import requests
-
-# --- Load environment variables
+# --- ENV VARIABLES
 load_dotenv()
 
-# --- Azure & Airbyte Config
 AZURE_STORAGE_ACCOUNT_NAME = os.getenv("AZURE_STORAGE_ACCOUNT_NAME")
 AZURE_STORAGE_CONTAINER_NAME = os.getenv("AZURE_STORAGE_CONTAINER_NAME")
 AZURE_STORAGE_ACCOUNT_KEY = os.getenv("AZURE_STORAGE_ACCOUNT_KEY")
 
-# MCP Config
-MCP_SERVER_URL = os.getenv("MCP_SERVER_URL")
-MCP_EXTENSION_KEY = os.getenv("MCP_EXTENSION_KEY")
+MCP_SERVER_URL = os.getenv("MCP_SERVER_URL")  # Azure Function URL
+MCP_EXTENSION_KEY = os.getenv("MCP_EXTENSION_KEY")  # x-functions-key
 
-# ---- Streamlit UI ----
+# --- STREAMLIT UI ---
+st.set_page_config(layout="wide", page_title="Azure Agentic Data Integrator")
+st.title("🔗 Azure Agentic Data Integrator with Airbyte & MCP")
 
-st.set_page_config(page_title="Azure Agentic Data Integrator", layout="wide")
-st.title("Azure + Airbyte + MCP Data Integration Demo")
+with st.expander("🔑 Airbyte + Azure Blob Storage Configuration"):
+    st.code(f"Account: {AZURE_STORAGE_ACCOUNT_NAME}")
+    st.code(f"Container: {AZURE_STORAGE_CONTAINER_NAME}")
 
-with st.expander("🔑 Azure Blob Storage Settings"):
-    st.write(f"Account Name: `{AZURE_STORAGE_ACCOUNT_NAME}`")
-    st.write(f"Container Name: `{AZURE_STORAGE_CONTAINER_NAME}`")
+with st.expander("🤖 MCP Server Settings"):
+    st.code(f"Endpoint: {MCP_SERVER_URL}")
 
-with st.expander("💬 MCP Server Settings"):
-    st.write(f"Endpoint: {MCP_SERVER_URL}")
+# --- AIRBYTE OPERATIONS ---
+st.subheader("🛠 1. Ingest Data From Azure Blob using Airbyte")
 
-# --- Airbyte Pipeline Section ---
-
-st.header("1. Extract & Cache Data with Airbyte (PyAirbyte)")
-
-if st.button("Trigger Azure Blob Ingestion"):
+if st.button("📥 Ingest Now using PyAirbyte"):
     try:
-        # Set up source connector (Azure Blob Storage as a source)
         source = ab.get_source(
-            "source-azure-blob-storage",
-            install_if_missing=True,
+            connector_name="source-azure-blob-storage",
             config={
                 "azure_blob_storage_account_name": AZURE_STORAGE_ACCOUNT_NAME,
                 "azure_blob_storage_container_name": AZURE_STORAGE_CONTAINER_NAME,
                 "azure_blob_storage_account_key": AZURE_STORAGE_ACCOUNT_KEY,
-                "format": {"format_type": "jsonl"},  # Or 'csv' as needed
-            }
+                "format": {"format_type": "jsonl"}
+            },
+            install_if_missing=True
         )
-        # Validate connection
-        check_result = source.check()
-        st.success(f"Connection check: {check_result}")
-
-        # List all available streams (folders/files)
+        check = source.check()
+        st.success(f"Airbyte Source Status: {check}")
+        
         streams = source.get_available_streams()
-        st.write("Available Streams:", streams)
-        source.select_all_streams()  # Select everything for demonstration
+        source.select_all_streams()
+        st.success(f"Streams Found: {streams}")
 
-        # Cache to DuckDB by default
         cache = ab.get_default_cache()
         result = source.read(cache=cache)
-        st.success("Data cached from Azure Blob Storage!")
+        st.success("✅ Data cached via PyAirbyte!")
 
-        # Display a DataFrame for the first stream
-        main_stream = streams[0] if streams else None
-        if main_stream:
-            df = cache[main_stream].to_pandas()
+        # Display sample from first stream
+        if streams:
+            df = cache[streams[0]].to_pandas()
             st.dataframe(df.head())
 
     except Exception as e:
-        st.error(f"Airbyte ingestion error: {str(e)}")
+        st.error(f"Airbyte Error: {str(e)}")
 
-# --- MCP Operations Section ---
+# --- MCP SECTION ---
+st.subheader("🤖 2. Trigger Azure MCP Agent")
 
-st.header("2. Interact with Azure MCP Server")
+default_payload = {
+    "tool": "hello",  # Replace with your custom tool if available
+    "arguments": {},
+    "key": MCP_EXTENSION_KEY
+}
+json_input = st.text_area("✍️ MCP Request Payload (JSON)", value=json.dumps(default_payload, indent=2), height=200)
+trigger = st.button("🚀 Send to MCP")
 
-input_payload = st.text_area(
-    "Enter JSON request for MCP server",
-    value='{"tool": "hello", "arguments": {}, "key": "' + (MCP_EXTENSION_KEY or "") + '"}'
-)
-trigger_mcp = st.button("Send to MCP Server")
-
-if trigger_mcp:
+if trigger:
     try:
         res = requests.post(
             MCP_SERVER_URL,
             headers={
-                "Content-Type": "application/json",
-                "x-functions-key": MCP_EXTENSION_KEY
+                "x-functions-key": MCP_EXTENSION_KEY,
+                "Content-Type": "application/json"
             },
-            data=input_payload
+            data=json_input
         )
-        st.text("MCP Server Response:")
-        st.code(res.text)
+        st.success("✅ MCP Response Received")
+        try:
+            st.json(res.json())
+        except:
+            st.text(res.text)
+
     except Exception as e:
-        st.error(f"MCP server call failed: {str(e)}")
+        st.error(f"❌ MCP Call Failed: {str(e)}")
 
-st.caption("© Your Company - Demo Agentic Data Integration Pipeline on Azure")
-
-# --- End of File ---
+st.markdown("---")
+st.caption("Built with 🤖 PyAirbyte, Azure Blob & MCP | Streamlit UI Demo")
