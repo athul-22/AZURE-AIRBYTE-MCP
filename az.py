@@ -12,7 +12,7 @@ load_dotenv()
 # Azure OpenAI configuration
 AZURE_OPENAI_ENDPOINT = os.getenv("AZURE_OPENAI_ENDPOINT")
 AZURE_OPENAI_MODEL = os.getenv("AZURE_OPENAI_MODEL", "gpt-4o")
-AZURE_OPENAI_API_KEY = os.getenv("AZURE_OPENAI_API_KEY")  # Add this
+AZURE_OPENAI_API_KEY = os.getenv("AZURE_OPENAI_API_KEY")
 
 # Choose authentication method
 USE_API_KEY = os.getenv("USE_API_KEY", "false").lower() == "true"
@@ -29,14 +29,27 @@ async def run():
         client = AzureOpenAI(
             azure_endpoint=AZURE_OPENAI_ENDPOINT,
             api_key=AZURE_OPENAI_API_KEY,
-            api_version="2024-04-01-preview"
+            api_version="2024-08-01-preview"  # Updated API version
         )
     else:
         client = AzureOpenAI(
             azure_endpoint=AZURE_OPENAI_ENDPOINT, 
-            api_version="2024-04-01-preview", 
+            api_version="2024-08-01-preview",  # Updated API version
             azure_ad_token_provider=token_provider
         )
+
+    # Test Azure OpenAI connection first
+    try:
+        test_response = client.chat.completions.create(
+            model=AZURE_OPENAI_MODEL,
+            messages=[{"role": "user", "content": "Hello"}],
+            max_tokens=10
+        )
+        print(f"✅ Azure OpenAI connection successful!")
+        print(f"Test response: {test_response.choices[0].message.content}")
+    except Exception as e:
+        print(f"❌ Azure OpenAI test failed: {e}")
+        return
 
     # MCP client configurations
     server_params = StdioServerParameters(
@@ -51,7 +64,9 @@ async def run():
 
             # List available tools
             tools = await session.list_tools()
-            for tool in tools.tools: print(tool.name)
+            print("Available tools:")
+            for tool in tools.tools: 
+                print(f"  - {tool.name}")
 
             # Format tools for Azure OpenAI
             available_tools = [{
@@ -68,13 +83,17 @@ async def run():
             while True:
                 try:
                     user_input = input("\nPrompt: ")
+                    if user_input.lower() in ['quit', 'exit', 'bye']:
+                        break
+                        
                     messages.append({"role": "user", "content": user_input})
 
                     # First API call with tool configuration
                     response = client.chat.completions.create(
-                        model = AZURE_OPENAI_MODEL,
-                        messages = messages,
-                        tools = available_tools)
+                        model=AZURE_OPENAI_MODEL,
+                        messages=messages,
+                        tools=available_tools
+                    )
 
                     # Process the model's response
                     response_message = response.choices[0].message
@@ -82,28 +101,36 @@ async def run():
 
                     # Handle function calls
                     if response_message.tool_calls:
+                        print("🔧 Model is calling tools...")
                         for tool_call in response_message.tool_calls:
-                                function_args = json.loads(tool_call.function.arguments)
-                                result = await session.call_tool(tool_call.function.name, function_args)
+                            function_args = json.loads(tool_call.function.arguments)
+                            print(f"Calling {tool_call.function.name} with args: {function_args}")
+                            result = await session.call_tool(tool_call.function.name, function_args)
 
-                                # Add the tool response to the messages
-                                messages.append({
-                                    "tool_call_id": tool_call.id,
-                                    "role": "tool",
-                                    "name": tool_call.function.name,
-                                    "content": result.content,
-                                })
+                            # Add the tool response to the messages
+                            messages.append({
+                                "tool_call_id": tool_call.id,
+                                "role": "tool",
+                                "name": tool_call.function.name,
+                                "content": result.content,
+                            })
+
+                        # Get the final response from the model after tool execution
+                        final_response = client.chat.completions.create(
+                            model=AZURE_OPENAI_MODEL,
+                            messages=messages,
+                            tools=available_tools
+                        )
+
+                        for item in final_response.choices:
+                            print(item.message.content)
                     else:
-                        logger.info("No tool calls were made by the model")
-
-                    # Get the final response from the model
-                    final_response = client.chat.completions.create(
-                        model = AZURE_OPENAI_MODEL,
-                        messages = messages,
-                        tools = available_tools)
-
-                    for item in final_response.choices:
-                        print(item.message.content)
+                        # No tool calls, just print the response
+                        print(response_message.content)
+                        
+                except KeyboardInterrupt:
+                    print("\nGoodbye!")
+                    break
                 except Exception as e:
                     logger.error(f"Error in conversation loop: {e}")
                     print(f"An error occurred: {e}")
