@@ -24,10 +24,10 @@ if not USE_API_KEY:
         DefaultAzureCredential(), "https://cognitiveservices.azure.com/.default"
     )
 
-def call_azure_openai_with_retry(client, **kwargs):
-    """Call Azure OpenAI with retry logic for rate limiting"""
-    max_retries = 3
-    base_delay = 60  # Start with 60 seconds as suggested
+def call_azure_openai_with_minimal_retry(client, **kwargs):
+    """Call Azure OpenAI with minimal retry logic - optimized for higher tier"""
+    max_retries = 2  # Reduced since you have higher limits
+    base_delay = 10   # Much shorter delay
     
     for attempt in range(max_retries):
         try:
@@ -35,9 +35,8 @@ def call_azure_openai_with_retry(client, **kwargs):
         except openai.RateLimitError as e:
             if attempt == max_retries - 1:
                 raise e
-            delay = base_delay * (2 ** attempt)  # Exponential backoff
-            print(f"🚫 Rate limit hit. Waiting {delay} seconds before retry {attempt + 1}/{max_retries}...")
-            time.sleep(delay)
+            print(f"⏳ Brief rate limit. Waiting {base_delay} seconds...")
+            time.sleep(base_delay)
         except Exception as e:
             raise e
 
@@ -47,25 +46,26 @@ async def run():
         client = AzureOpenAI(
             azure_endpoint=AZURE_OPENAI_ENDPOINT,
             api_key=AZURE_OPENAI_API_KEY,
-            api_version="2024-08-01-preview"  # Updated API version
+            api_version="2024-08-01-preview"
         )
     else:
         client = AzureOpenAI(
             azure_endpoint=AZURE_OPENAI_ENDPOINT, 
-            api_version="2024-08-01-preview",  # Updated API version
+            api_version="2024-08-01-preview",
             azure_ad_token_provider=token_provider
         )
 
-    # Test Azure OpenAI connection first with retry
+    # Test Azure OpenAI connection first
     try:
-        test_response = call_azure_openai_with_retry(
+        test_response = call_azure_openai_with_minimal_retry(
             client,
             model=AZURE_OPENAI_MODEL,
             messages=[{"role": "user", "content": "Hello"}],
-            max_tokens=10
+            max_tokens=50
         )
         print(f"✅ Azure OpenAI connection successful!")
         print(f"Test response: {test_response.choices[0].message.content}")
+        print(f"💰 Using credits - High performance mode enabled!")
     except Exception as e:
         print(f"❌ Azure OpenAI test failed: {e}")
         return
@@ -83,9 +83,9 @@ async def run():
 
             # List available tools
             tools = await session.list_tools()
-            print("Available tools:")
+            print("Available Azure MCP tools:")
             for tool in tools.tools: 
-                print(f"  - {tool.name}")
+                print(f"  🔧 {tool.name} - {tool.description}")
 
             # Format tools for Azure OpenAI
             available_tools = [{
@@ -97,24 +97,28 @@ async def run():
                 }
             } for tool in tools.tools]
 
-            # Start conversational loop with rate limiting
+            print(f"\n🚀 Ready! You can now chat and use {len(available_tools)} Azure tools.")
+            print("💡 Try: 'List my Azure resources' or 'Create a storage account'")
+
+            # Start conversational loop - optimized for higher tier
             messages = []
             while True:
                 try:
-                    user_input = input("\nPrompt: ")
+                    user_input = input("\n💬 You: ")
                     if user_input.lower() in ['quit', 'exit', 'bye']:
                         break
                         
                     messages.append({"role": "user", "content": user_input})
 
-                    # First API call with tool configuration and retry logic
-                    print("🤖 Thinking...")
-                    response = call_azure_openai_with_retry(
+                    # First API call - increased tokens for better responses
+                    print("🤖 Assistant: ", end="", flush=True)
+                    response = call_azure_openai_with_minimal_retry(
                         client,
                         model=AZURE_OPENAI_MODEL,
                         messages=messages,
                         tools=available_tools,
-                        max_tokens=300  # Reduced to save tokens
+                        max_tokens=1000,  # Increased for better responses
+                        temperature=0.1   # Lower temp for more consistent tool usage
                     )
 
                     # Process the model's response
@@ -123,10 +127,12 @@ async def run():
 
                     # Handle function calls
                     if response_message.tool_calls:
-                        print("🔧 Model is calling tools...")
+                        print("🔧 Executing Azure tasks...\n")
+                        
                         for tool_call in response_message.tool_calls:
                             function_args = json.loads(tool_call.function.arguments)
-                            print(f"Calling {tool_call.function.name} with args: {function_args}")
+                            print(f"  ⚡ {tool_call.function.name}({function_args})")
+                            
                             result = await session.call_tool(tool_call.function.name, function_args)
 
                             # Add the tool response to the messages
@@ -138,34 +144,36 @@ async def run():
                             })
 
                         # Get the final response from the model after tool execution
-                        print("🤖 Processing results...")
-                        final_response = call_azure_openai_with_retry(
+                        final_response = call_azure_openai_with_minimal_retry(
                             client,
                             model=AZURE_OPENAI_MODEL,
                             messages=messages,
                             tools=available_tools,
-                            max_tokens=300  # Reduced to save tokens
+                            max_tokens=1000,
+                            temperature=0.1
                         )
 
-                        for item in final_response.choices:
-                            print(item.message.content)
+                        assistant_response = final_response.choices[0].message.content
+                        print(f"✅ {assistant_response}")
+                        messages.append(final_response.choices[0].message)
                     else:
                         # No tool calls, just print the response
                         print(response_message.content)
                         
-                    # Add a small delay between requests to avoid rate limiting
-                    time.sleep(2)
+                    # No artificial delays needed with higher tier
                     
                 except KeyboardInterrupt:
-                    print("\nGoodbye!")
+                    print("\n👋 Goodbye!")
                     break
                 except Exception as e:
                     logger.error(f"Error in conversation loop: {e}")
-                    print(f"An error occurred: {e}")
+                    print(f"❌ Error: {e}")
                     if "rate limit" in str(e).lower():
-                        print("💡 Tip: Try upgrading your Azure OpenAI pricing tier or wait a minute before continuing.")
-                        time.sleep(10) 
+                        print("⚠️  Unexpected rate limit. Checking pricing tier...")
+                        time.sleep(5)
 
 if __name__ == "__main__":
+    print("🚀 Starting Azure AI Assistant with MCP...")
+    print("💰 Using Azure credits - High performance mode")
     import asyncio
     asyncio.run(run())

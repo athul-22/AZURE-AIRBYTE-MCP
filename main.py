@@ -7,9 +7,11 @@ import requests
 import airbyte as ab
 import subprocess
 import asyncio
+import time
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 from openai import AzureOpenAI
+import openai
 
 # --- ENV VARIABLES
 load_dotenv()
@@ -28,8 +30,9 @@ AZURE_OPENAI_MODEL = os.getenv("AZURE_OPENAI_MODEL", "gpt-4o")
 AZURE_OPENAI_API_KEY = os.getenv("AZURE_OPENAI_API_KEY")
 
 # --- STREAMLIT UI ---
-st.set_page_config(layout="wide", page_title="Azure Agentic Data Integrator")
-st.title("🔗 Azure Agentic Data Integrator with Airbyte & MCP")
+st.set_page_config(layout="wide", page_title="Azure Agentic Data Integrator", page_icon="🚀")
+st.title("🚀 Azure Agentic Data Integrator with MCP")
+st.caption("💰 Powered by Azure Credits - High Performance Mode")
 
 # Initialize Azure OpenAI client
 @st.cache_resource
@@ -40,7 +43,27 @@ def get_azure_openai_client():
         api_version="2024-08-01-preview"
     )
 
-with st.expander("🔑 Configuration"):
+def call_azure_openai_optimized(client, **kwargs):
+    """Optimized Azure OpenAI calls for higher tier"""
+    try:
+        return client.chat.completions.create(**kwargs)
+    except openai.RateLimitError as e:
+        st.warning("Brief rate limit encountered. Retrying...")
+        time.sleep(5)
+        return client.chat.completions.create(**kwargs)
+    except Exception as e:
+        raise e
+
+# Credit usage indicator
+col1, col2, col3 = st.columns(3)
+with col1:
+    st.metric("💰 Credits Available", "$1,000", "Azure Sponsorship")
+with col2:
+    st.metric("⚡ Performance", "High", "S1/S2 Tier")
+with col3:
+    st.metric("🔧 MCP Tools", "Azure", "Available")
+
+with st.expander("🔑 Configuration", expanded=False):
     st.code(f"Azure Storage Account: {AZURE_STORAGE_ACCOUNT_NAME}")
     st.code(f"Azure Storage Container: {AZURE_STORAGE_CONTAINER_NAME}")
     st.code(f"MCP Command: {MCP_SERVER_COMMAND}")
@@ -50,36 +73,37 @@ with st.expander("🔑 Configuration"):
 # --- AIRBYTE OPERATIONS ---
 st.subheader("🛠 1. Ingest Data From Azure Blob using Airbyte")
 
-if st.button("📥 Ingest Now using PyAirbyte"):
-    try:
-        source = ab.get_source(
-            connector_name="source-azure-blob-storage",
-            config={
-                "azure_blob_storage_account_name": AZURE_STORAGE_ACCOUNT_NAME,
-                "azure_blob_storage_container_name": AZURE_STORAGE_CONTAINER_NAME,
-                "azure_blob_storage_account_key": AZURE_STORAGE_ACCOUNT_KEY,
-                "format": {"format_type": "jsonl"}
-            },
-            install_if_missing=True
-        )
-        check = source.check()
-        st.success(f"Airbyte Source Status: {check}")
-        
-        streams = source.get_available_streams()
-        source.select_all_streams()
-        st.success(f"Streams Found: {streams}")
+if st.button("📥 Ingest Now using PyAirbyte", type="primary"):
+    with st.spinner("🔄 Ingesting data..."):
+        try:
+            source = ab.get_source(
+                connector_name="source-azure-blob-storage",
+                config={
+                    "azure_blob_storage_account_name": AZURE_STORAGE_ACCOUNT_NAME,
+                    "azure_blob_storage_container_name": AZURE_STORAGE_CONTAINER_NAME,
+                    "azure_blob_storage_account_key": AZURE_STORAGE_ACCOUNT_KEY,
+                    "format": {"format_type": "jsonl"}
+                },
+                install_if_missing=True
+            )
+            check = source.check()
+            st.success(f"✅ Airbyte Source Status: {check}")
+            
+            streams = source.get_available_streams()
+            source.select_all_streams()
+            st.success(f"✅ Streams Found: {streams}")
 
-        cache = ab.get_default_cache()
-        result = source.read(cache=cache)
-        st.success("✅ Data cached via PyAirbyte!")
+            cache = ab.get_default_cache()
+            result = source.read(cache=cache)
+            st.success("✅ Data cached via PyAirbyte!")
 
-        # Display sample from first stream
-        if streams:
-            df = cache[streams[0]].to_pandas()
-            st.dataframe(df.head())
+            # Display sample from first stream
+            if streams:
+                df = cache[streams[0]].to_pandas()
+                st.dataframe(df.head(), use_container_width=True)
 
-    except Exception as e:
-        st.error(f"Airbyte Error: {str(e)}")
+        except Exception as e:
+            st.error(f"❌ Airbyte Error: {str(e)}")
 
 # --- AZURE AI CHAT SECTION ---
 st.subheader("🤖 2. Chat with Azure AI + MCP Tools")
@@ -87,6 +111,20 @@ st.subheader("🤖 2. Chat with Azure AI + MCP Tools")
 # Initialize session state for chat
 if 'messages' not in st.session_state:
     st.session_state.messages = []
+
+# Suggested prompts for Azure tasks
+st.info("💡 **Try these commands:**")
+col1, col2 = st.columns(2)
+with col1:
+    if st.button("📋 List my Azure resources"):
+        st.session_state.suggested_prompt = "List all my Azure resources"
+    if st.button("💾 Create storage account"):
+        st.session_state.suggested_prompt = "Create a new Azure storage account"
+with col2:
+    if st.button("🔍 Check resource group"):
+        st.session_state.suggested_prompt = "Show me details of my resource groups"
+    if st.button("📊 Get cost analysis"):
+        st.session_state.suggested_prompt = "Show me Azure cost analysis"
 
 async def get_mcp_tools():
     """Get available MCP tools"""
@@ -139,13 +177,21 @@ def run_async_in_streamlit(coro):
 # Chat interface
 user_input = st.chat_input("Ask me anything about Azure or request a task...")
 
+# Handle suggested prompts
+if 'suggested_prompt' in st.session_state:
+    user_input = st.session_state.suggested_prompt
+    del st.session_state.suggested_prompt
+
 if user_input:
     # Add user message
     st.session_state.messages.append({"role": "user", "content": user_input})
     
     # Get MCP tools
-    with st.spinner("Getting available tools..."):
+    with st.spinner("🔧 Loading Azure tools..."):
         tools = run_async_in_streamlit(get_mcp_tools())
+    
+    if tools:
+        st.success(f"✅ Loaded {len(tools)} Azure MCP tools")
     
     # Format tools for Azure OpenAI
     available_tools = [{
@@ -160,12 +206,15 @@ if user_input:
     # Call Azure OpenAI
     client = get_azure_openai_client()
     
-    with st.spinner("Thinking..."):
+    with st.spinner("🤖 Processing with Azure AI..."):
         try:
-            response = client.chat.completions.create(
+            response = call_azure_openai_optimized(
+                client,
                 model=AZURE_OPENAI_MODEL,
                 messages=st.session_state.messages,
-                tools=available_tools if available_tools else None
+                tools=available_tools if available_tools else None,
+                max_tokens=1500,  # Increased for detailed responses
+                temperature=0.1
             )
             
             response_message = response.choices[0].message
@@ -175,8 +224,12 @@ if user_input:
             if response_message.tool_calls:
                 st.info("🔧 Executing Azure tasks...")
                 
-                for tool_call in response_message.tool_calls:
+                progress_bar = st.progress(0)
+                for i, tool_call in enumerate(response_message.tool_calls):
                     function_args = json.loads(tool_call.function.arguments)
+                    
+                    st.write(f"⚡ Calling: `{tool_call.function.name}`")
+                    st.code(json.dumps(function_args, indent=2))
                     
                     # Call MCP tool
                     result = run_async_in_streamlit(
@@ -190,19 +243,27 @@ if user_input:
                         "name": tool_call.function.name,
                         "content": json.dumps(result),
                     })
+                    
+                    progress_bar.progress((i + 1) / len(response_message.tool_calls))
+                
+                progress_bar.empty()
                 
                 # Get final response
-                final_response = client.chat.completions.create(
-                    model=AZURE_OPENAI_MODEL,
-                    messages=st.session_state.messages,
-                    tools=available_tools if available_tools else None
-                )
-                
-                final_message = final_response.choices[0].message
-                st.session_state.messages.append(final_message)
+                with st.spinner("🤖 Finalizing response..."):
+                    final_response = call_azure_openai_optimized(
+                        client,
+                        model=AZURE_OPENAI_MODEL,
+                        messages=st.session_state.messages,
+                        tools=available_tools if available_tools else None,
+                        max_tokens=1500,
+                        temperature=0.1
+                    )
+                    
+                    final_message = final_response.choices[0].message
+                    st.session_state.messages.append(final_message)
             
         except Exception as e:
-            st.error(f"Error: {e}")
+            st.error(f"❌ Error: {e}")
 
 # Display chat messages
 for message in st.session_state.messages:
@@ -219,4 +280,4 @@ if st.button("🗑️ Clear Chat"):
     st.rerun()
 
 st.markdown("---")
-st.caption("Built with 🤖 Azure OpenAI, Azure MCP & Streamlit")
+st.caption("🚀 High Performance Mode - Built with Azure Credits, OpenAI GPT-4o, Azure MCP & Streamlit")
