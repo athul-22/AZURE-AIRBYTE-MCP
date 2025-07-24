@@ -10,8 +10,7 @@ import asyncio
 import time
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
-from openai import AzureOpenAI
-import openai
+import google.generativeai as genai
 
 # --- ENV VARIABLES
 load_dotenv()
@@ -24,51 +23,91 @@ AZURE_STORAGE_ACCOUNT_KEY = os.getenv("AZURE_STORAGE_ACCOUNT_KEY")
 MCP_SERVER_COMMAND = os.getenv("MCP_SERVER_COMMAND", "npx -y @azure/mcp@latest server start")
 MCP_API_KEY = os.getenv("MCP_API_KEY")
 
-# Azure OpenAI configuration
-AZURE_OPENAI_ENDPOINT = os.getenv("AZURE_OPENAI_ENDPOINT")
-AZURE_OPENAI_MODEL = os.getenv("AZURE_OPENAI_MODEL", "gpt-4o")
-AZURE_OPENAI_API_KEY = os.getenv("AZURE_OPENAI_API_KEY")
+# Google Gemini configuration
+GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-1.5-pro")
+
+# Configure Gemini
+if GOOGLE_API_KEY:
+    genai.configure(api_key=GOOGLE_API_KEY)
 
 # --- STREAMLIT UI ---
 st.set_page_config(layout="wide", page_title="Azure Agentic Data Integrator", page_icon="🚀")
-st.title("🚀 Azure Agentic Data Integrator with MCP")
-st.caption("💰 Powered by Azure Credits - High Performance Mode")
+st.title("🚀 Azure Agentic Data Integrator with MCP + Gemini")
+st.caption("🤖 Powered by Google Gemini + Azure MCP Tools")
 
-# Initialize Azure OpenAI client
+# Initialize Gemini client
 @st.cache_resource
-def get_azure_openai_client():
-    return AzureOpenAI(
-        azure_endpoint=AZURE_OPENAI_ENDPOINT,
-        api_key=AZURE_OPENAI_API_KEY,
-        api_version="2024-08-01-preview"
-    )
+def get_gemini_client():
+    if not GOOGLE_API_KEY:
+        st.error("❌ GOOGLE_API_KEY not found in environment variables")
+        return None
+    return genai.GenerativeModel(GEMINI_MODEL)
 
-def call_azure_openai_optimized(client, **kwargs):
-    """Optimized Azure OpenAI calls for higher tier"""
-    try:
-        return client.chat.completions.create(**kwargs)
-    except openai.RateLimitError as e:
-        st.warning("Brief rate limit encountered. Retrying...")
-        time.sleep(5)
-        return client.chat.completions.create(**kwargs)
-    except Exception as e:
-        raise e
+def create_tool_aware_prompt(user_input, mcp_tools):
+    """Create a prompt that makes Gemini aware of available tools"""
+    if not mcp_tools:
+        return user_input
+    
+    tool_list = []
+    for tool in mcp_tools:
+        tool_info = f"**{tool.name}**: {tool.description}"
+        if hasattr(tool, 'inputSchema') and tool.inputSchema:
+            properties = tool.inputSchema.get('properties', {})
+            if properties:
+                params = ", ".join(properties.keys())
+                tool_info += f" (Parameters: {params})"
+        tool_list.append(tool_info)
+    
+    tools_text = "\n".join(tool_list)
+    
+    return f"""
+{user_input}
+
+Available Azure MCP tools:
+{tools_text}
+
+Please provide a helpful response. If you think any of these Azure tools would be useful for the user's request, mention which tool(s) should be used and why. Be specific about which tool would help accomplish the task.
+"""
+
+def extract_tool_suggestions(response_text, mcp_tools):
+    """Extract tool suggestions from Gemini's response"""
+    if not mcp_tools:
+        return []
+    
+    suggested_tools = []
+    response_lower = response_text.lower()
+    
+    for tool in mcp_tools:
+        tool_name_lower = tool.name.lower()
+        # Check if tool name is mentioned in response
+        if tool_name_lower in response_lower:
+            suggested_tools.append(tool)
+    
+    return suggested_tools
 
 # Credit usage indicator
 col1, col2, col3 = st.columns(3)
 with col1:
-    st.metric("💰 Credits Available", "$1,000", "Azure Sponsorship")
+    st.metric("🤖 AI Model", "Gemini", "Google AI")
 with col2:
-    st.metric("⚡ Performance", "High", "S1/S2 Tier")
+    st.metric("⚡ Performance", "High", "No Rate Limits")
 with col3:
     st.metric("🔧 MCP Tools", "Azure", "Available")
+
+# API Key status
+if not GOOGLE_API_KEY:
+    st.error("❌ **Missing Google API Key!** Please add GOOGLE_API_KEY to your .env file")
+    st.info("💡 Get your API key from: https://makersuite.google.com/app/apikey")
+else:
+    st.success("✅ Google API Key configured")
 
 with st.expander("🔑 Configuration", expanded=False):
     st.code(f"Azure Storage Account: {AZURE_STORAGE_ACCOUNT_NAME}")
     st.code(f"Azure Storage Container: {AZURE_STORAGE_CONTAINER_NAME}")
     st.code(f"MCP Command: {MCP_SERVER_COMMAND}")
-    st.code(f"Azure OpenAI Endpoint: {AZURE_OPENAI_ENDPOINT}")
-    st.code(f"Azure OpenAI Model: {AZURE_OPENAI_MODEL}")
+    st.code(f"Gemini Model: {GEMINI_MODEL}")
+    st.code(f"Google API Key: {'✅ Set' if GOOGLE_API_KEY else '❌ Missing'}")
 
 # --- AIRBYTE OPERATIONS ---
 st.subheader("🛠 1. Ingest Data From Azure Blob using Airbyte")
@@ -106,14 +145,14 @@ if st.button("📥 Ingest Now using PyAirbyte", type="primary"):
             st.error(f"❌ Airbyte Error: {str(e)}")
 
 # --- AZURE AI CHAT SECTION ---
-st.subheader("🤖 2. Chat with Azure AI + MCP Tools")
+st.subheader("🤖 2. Chat with Gemini + Azure MCP Tools")
 
 # Initialize session state for chat
 if 'messages' not in st.session_state:
     st.session_state.messages = []
 
 # Suggested prompts for Azure tasks
-st.info("💡 **Try these commands:**")
+st.info("💡 **Try these Azure commands with Gemini:**")
 col1, col2 = st.columns(2)
 with col1:
     if st.button("📋 List my Azure resources"):
@@ -175,109 +214,148 @@ def run_async_in_streamlit(coro):
         return {"error": f"Async Error: {str(e)}"}
 
 # Chat interface
-user_input = st.chat_input("Ask me anything about Azure or request a task...")
+user_input = st.chat_input("Ask me anything about Azure...")
 
 # Handle suggested prompts
 if 'suggested_prompt' in st.session_state:
     user_input = st.session_state.suggested_prompt
     del st.session_state.suggested_prompt
 
-if user_input:
+if user_input and GOOGLE_API_KEY:
     # Add user message
     st.session_state.messages.append({"role": "user", "content": user_input})
     
-    # Get MCP tools
-    with st.spinner("🔧 Loading Azure tools..."):
-        tools = run_async_in_streamlit(get_mcp_tools())
+    # Get MCP tools (cache them for performance)
+    if 'cached_mcp_tools' not in st.session_state:
+        with st.spinner("🔧 Loading Azure tools..."):
+            mcp_tools = run_async_in_streamlit(get_mcp_tools())
+            st.session_state.cached_mcp_tools = mcp_tools
+    else:
+        mcp_tools = st.session_state.cached_mcp_tools
     
-    if tools:
-        st.success(f"✅ Loaded {len(tools)} Azure MCP tools")
+    if mcp_tools:
+        st.success(f"✅ Loaded {len(mcp_tools)} Azure MCP tools")
+    else:
+        st.warning("⚠️ No MCP tools loaded")
     
-    # Format tools for Azure OpenAI
-    available_tools = [{
-        "type": "function",
-        "function": {
-            "name": tool.name,
-            "description": tool.description,
-            "parameters": tool.inputSchema
-        }
-    } for tool in tools] if tools else []
+    # Call Gemini
+    client = get_gemini_client()
     
-    # Call Azure OpenAI
-    client = get_azure_openai_client()
-    
-    with st.spinner("🤖 Processing with Azure AI..."):
-        try:
-            response = call_azure_openai_optimized(
-                client,
-                model=AZURE_OPENAI_MODEL,
-                messages=st.session_state.messages,
-                tools=available_tools if available_tools else None,
-                max_tokens=1500,  # Increased for detailed responses
-                temperature=0.1
-            )
-            
-            response_message = response.choices[0].message
-            st.session_state.messages.append(response_message)
-            
-            # Handle tool calls
-            if response_message.tool_calls:
-                st.info("🔧 Executing Azure tasks...")
+    if client:
+        with st.spinner("🤖 Processing with Gemini..."):
+            try:
+                # Create tool-aware prompt
+                enhanced_prompt = create_tool_aware_prompt(user_input, mcp_tools)
                 
-                progress_bar = st.progress(0)
-                for i, tool_call in enumerate(response_message.tool_calls):
-                    function_args = json.loads(tool_call.function.arguments)
-                    
-                    st.write(f"⚡ Calling: `{tool_call.function.name}`")
-                    st.code(json.dumps(function_args, indent=2))
-                    
-                    # Call MCP tool
-                    result = run_async_in_streamlit(
-                        call_mcp_tool_async(tool_call.function.name, function_args)
-                    )
-                    
-                    # Add tool response
-                    st.session_state.messages.append({
-                        "tool_call_id": tool_call.id,
-                        "role": "tool",
-                        "name": tool_call.function.name,
-                        "content": json.dumps(result),
-                    })
-                    
-                    progress_bar.progress((i + 1) / len(response_message.tool_calls))
+                # Call Gemini
+                response = client.generate_content(enhanced_prompt)
                 
-                progress_bar.empty()
+                # Display response
+                assistant_message = response.text
+                st.session_state.messages.append({"role": "assistant", "content": assistant_message})
                 
-                # Get final response
-                with st.spinner("🤖 Finalizing response..."):
-                    final_response = call_azure_openai_optimized(
-                        client,
-                        model=AZURE_OPENAI_MODEL,
-                        messages=st.session_state.messages,
-                        tools=available_tools if available_tools else None,
-                        max_tokens=1500,
-                        temperature=0.1
-                    )
+                # Check for tool suggestions
+                suggested_tools = extract_tool_suggestions(assistant_message, mcp_tools)
+                
+                if suggested_tools:
+                    st.info(f"🔧 Gemini suggests using {len(suggested_tools)} Azure tool(s)")
                     
-                    final_message = final_response.choices[0].message
-                    st.session_state.messages.append(final_message)
-            
-        except Exception as e:
-            st.error(f"❌ Error: {e}")
+                    # Show suggested tools with execution buttons
+                    for tool in suggested_tools:
+                        with st.expander(f"🛠️ Execute: {tool.name}", expanded=False):
+                            st.write(f"**Description**: {tool.description}")
+                            
+                            # Show parameters if available
+                            if hasattr(tool, 'inputSchema') and tool.inputSchema:
+                                properties = tool.inputSchema.get('properties', {})
+                                if properties:
+                                    st.write("**Parameters needed:**")
+                                    for param, schema in properties.items():
+                                        param_type = schema.get('type', 'string')
+                                        param_desc = schema.get('description', 'No description')
+                                        st.code(f"{param} ({param_type}): {param_desc}")
+                            
+                            # Execute button
+                            if st.button(f"▶️ Execute {tool.name}", key=f"exec_{tool.name}"):
+                                with st.spinner(f"Executing {tool.name}..."):
+                                    # For now, execute with empty parameters
+                                    # In a full implementation, you'd want to collect parameters from user
+                                    result = run_async_in_streamlit(
+                                        call_mcp_tool_async(tool.name, {})
+                                    )
+                                    
+                                    if "error" in str(result):
+                                        st.error(f"❌ Tool execution failed: {result}")
+                                    else:
+                                        st.success("✅ Tool executed successfully!")
+                                        st.json(result.content if hasattr(result, 'content') else result)
+                                        
+                                        # Add tool result to conversation
+                                        tool_result_message = f"Tool {tool.name} executed successfully. Result: {result.content if hasattr(result, 'content') else result}"
+                                        st.session_state.messages.append({
+                                            "role": "assistant", 
+                                            "content": tool_result_message
+                                        })
+                
+            except Exception as e:
+                st.error(f"❌ Error: {e}")
+                if "API_KEY" in str(e):
+                    st.info("💡 Check your Google API key configuration")
+
+elif user_input and not GOOGLE_API_KEY:
+    st.error("❌ Cannot process request: Google API Key is missing")
 
 # Display chat messages
+st.subheader("💬 Conversation")
 for message in st.session_state.messages:
     if message["role"] == "user":
         with st.chat_message("user"):
             st.write(message["content"])
-    elif message["role"] == "assistant" and hasattr(message, 'content') and message.content:
+    elif message["role"] == "assistant":
         with st.chat_message("assistant"):
-            st.write(message.content)
+            st.write(message["content"])
 
-# Clear chat button
-if st.button("🗑️ Clear Chat"):
-    st.session_state.messages = []
-    st.rerun()
+# Control buttons
+col1, col2, col3 = st.columns(3)
+with col1:
+    if st.button("🗑️ Clear Chat"):
+        st.session_state.messages = []
+        st.rerun()
+
+with col2:
+    if st.button("🔄 Refresh Tools"):
+        if 'cached_mcp_tools' in st.session_state:
+            del st.session_state.cached_mcp_tools
+        st.rerun()
+
+with col3:
+    if st.button("🧪 Test Gemini"):
+        if GOOGLE_API_KEY:
+            try:
+                client = get_gemini_client()
+                test_response = client.generate_content("Say hello in one word")
+                st.success(f"✅ Gemini test: {test_response.text}")
+            except Exception as e:
+                st.error(f"❌ Gemini test failed: {e}")
+        else:
+            st.error("❌ No API key to test")
 
 st.markdown("---")
-st.caption("🚀 High Performance Mode - Built with Azure Credits, OpenAI GPT-4o, Azure MCP & Streamlit")
+st.caption("🤖 Powered by Google Gemini + Azure MCP Tools + Streamlit")
+
+# Debug info
+if st.checkbox("🔍 Show Debug Info"):
+    st.subheader("Debug Information")
+    col1, col2 = st.columns(2)
+    with col1:
+        st.write("**Environment Variables:**")
+        st.code(f"GOOGLE_API_KEY: {'Set' if GOOGLE_API_KEY else 'Not Set'}")
+        st.code(f"GEMINI_MODEL: {GEMINI_MODEL}")
+        st.code(f"MCP_SERVER_COMMAND: {MCP_SERVER_COMMAND}")
+    
+    with col2:
+        st.write("**Session State:**")
+        st.code(f"Messages: {len(st.session_state.messages)}")
+        st.code(f"Cached Tools: {'Yes' if 'cached_mcp_tools' in st.session_state else 'No'}")
+        if 'cached_mcp_tools' in st.session_state:
+            st.code(f"Tool Count: {len(st.session_state.cached_mcp_tools)}")
