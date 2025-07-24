@@ -9,6 +9,7 @@ import subprocess
 import asyncio
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
+from openai import AzureOpenAI
 
 # --- ENV VARIABLES
 load_dotenv()
@@ -17,20 +18,34 @@ AZURE_STORAGE_ACCOUNT_NAME = os.getenv("AZURE_STORAGE_ACCOUNT_NAME")
 AZURE_STORAGE_CONTAINER_NAME = os.getenv("AZURE_STORAGE_CONTAINER_NAME")
 AZURE_STORAGE_ACCOUNT_KEY = os.getenv("AZURE_STORAGE_ACCOUNT_KEY")
 
-MCP_SERVER_COMMAND = os.getenv("MCP_SERVER_COMMAND", "dotnet azmcp.dll server start")  # Command to start MCP server
+# Updated MCP configuration
+MCP_SERVER_COMMAND = os.getenv("MCP_SERVER_COMMAND", "npx -y @azure/mcp@latest server start")
 MCP_API_KEY = os.getenv("MCP_API_KEY")
+
+# Azure OpenAI configuration
+AZURE_OPENAI_ENDPOINT = os.getenv("AZURE_OPENAI_ENDPOINT")
+AZURE_OPENAI_MODEL = os.getenv("AZURE_OPENAI_MODEL", "gpt-4o")
+AZURE_OPENAI_API_KEY = os.getenv("AZURE_OPENAI_API_KEY")
 
 # --- STREAMLIT UI ---
 st.set_page_config(layout="wide", page_title="Azure Agentic Data Integrator")
 st.title("🔗 Azure Agentic Data Integrator with Airbyte & MCP")
 
-with st.expander("🔑 Airbyte + Azure Blob Storage Configuration"):
-    st.code(f"Account: {AZURE_STORAGE_ACCOUNT_NAME}")
-    st.code(f"Container: {AZURE_STORAGE_CONTAINER_NAME}")
+# Initialize Azure OpenAI client
+@st.cache_resource
+def get_azure_openai_client():
+    return AzureOpenAI(
+        azure_endpoint=AZURE_OPENAI_ENDPOINT,
+        api_key=AZURE_OPENAI_API_KEY,
+        api_version="2024-08-01-preview"
+    )
 
-with st.expander("🤖 MCP Server Settings"):
-    st.code(f"Command: {MCP_SERVER_COMMAND}")
-    st.code(f"API Key: {'*' * len(MCP_API_KEY) if MCP_API_KEY else 'Not Set'}")
+with st.expander("🔑 Configuration"):
+    st.code(f"Azure Storage Account: {AZURE_STORAGE_ACCOUNT_NAME}")
+    st.code(f"Azure Storage Container: {AZURE_STORAGE_CONTAINER_NAME}")
+    st.code(f"MCP Command: {MCP_SERVER_COMMAND}")
+    st.code(f"Azure OpenAI Endpoint: {AZURE_OPENAI_ENDPOINT}")
+    st.code(f"Azure OpenAI Model: {AZURE_OPENAI_MODEL}")
 
 # --- AIRBYTE OPERATIONS ---
 st.subheader("🛠 1. Ingest Data From Azure Blob using Airbyte")
@@ -66,124 +81,142 @@ if st.button("📥 Ingest Now using PyAirbyte"):
     except Exception as e:
         st.error(f"Airbyte Error: {str(e)}")
 
-# --- MCP SECTION ---
-st.subheader("🤖 2. Trigger Azure MCP Agent")
+# --- AZURE AI CHAT SECTION ---
+st.subheader("🤖 2. Chat with Azure AI + MCP Tools")
 
-# MCP Tool selection
-available_tools = ["hello", "list_resources", "read_resource", "custom_tool"]
-selected_tool = st.selectbox("🔧 Select MCP Tool", available_tools)
+# Initialize session state for chat
+if 'messages' not in st.session_state:
+    st.session_state.messages = []
 
-# Tool arguments input
-tool_arguments = st.text_area(
-    "📝 Tool Arguments (JSON)", 
-    value='{}', 
-    height=100,
-    help="Enter JSON arguments for the selected tool"
-)
-
-async def call_mcp_tool(command, tool_name, arguments):
-    """Call MCP tool using stdio transport"""
+async def get_mcp_tools():
+    """Get available MCP tools"""
     try:
-        # Parse command
-        cmd_parts = command.split()
-        
-        # Create server parameters
+        cmd_parts = MCP_SERVER_COMMAND.split()
         server_params = StdioServerParameters(
             command=cmd_parts[0],
             args=cmd_parts[1:] if len(cmd_parts) > 1 else [],
             env=None
         )
         
-        # Connect to MCP server
         async with stdio_client(server_params) as (read, write):
             async with ClientSession(read, write) as session:
-                # Initialize the session
                 await session.initialize()
-                
-                # Parse arguments
-                try:
-                    args = json.loads(arguments) if arguments.strip() else {}
-                except json.JSONDecodeError:
-                    return {"error": "Invalid JSON arguments"}
-                
-                # Call the tool
-                result = await session.call_tool(tool_name, args)
+                tools = await session.list_tools()
+                return tools.tools
+    except Exception as e:
+        st.error(f"Failed to get MCP tools: {e}")
+        return []
+
+async def call_mcp_tool_async(tool_name, arguments):
+    """Call MCP tool asynchronously"""
+    try:
+        cmd_parts = MCP_SERVER_COMMAND.split()
+        server_params = StdioServerParameters(
+            command=cmd_parts[0],
+            args=cmd_parts[1:] if len(cmd_parts) > 1 else [],
+            env=None
+        )
+        
+        async with stdio_client(server_params) as (read, write):
+            async with ClientSession(read, write) as session:
+                await session.initialize()
+                result = await session.call_tool(tool_name, arguments)
                 return result
-                
     except Exception as e:
         return {"error": f"MCP Error: {str(e)}"}
 
-def run_mcp_sync(command, tool_name, arguments):
-    """Synchronous wrapper for MCP call"""
+def run_async_in_streamlit(coro):
+    """Run async function in Streamlit"""
     try:
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
-        result = loop.run_until_complete(call_mcp_tool(command, tool_name, arguments))
+        result = loop.run_until_complete(coro)
         loop.close()
         return result
     except Exception as e:
         return {"error": f"Async Error: {str(e)}"}
 
-if st.button("🚀 Call MCP Tool"):
-    if not MCP_SERVER_COMMAND:
-        st.error("❌ MCP_SERVER_COMMAND not configured in .env file")
-    else:
-        with st.spinner(f"Calling MCP tool '{selected_tool}'..."):
-            try:
-                result = run_mcp_sync(MCP_SERVER_COMMAND, selected_tool, tool_arguments)
+# Chat interface
+user_input = st.chat_input("Ask me anything about Azure or request a task...")
+
+if user_input:
+    # Add user message
+    st.session_state.messages.append({"role": "user", "content": user_input})
+    
+    # Get MCP tools
+    with st.spinner("Getting available tools..."):
+        tools = run_async_in_streamlit(get_mcp_tools())
+    
+    # Format tools for Azure OpenAI
+    available_tools = [{
+        "type": "function",
+        "function": {
+            "name": tool.name,
+            "description": tool.description,
+            "parameters": tool.inputSchema
+        }
+    } for tool in tools] if tools else []
+    
+    # Call Azure OpenAI
+    client = get_azure_openai_client()
+    
+    with st.spinner("Thinking..."):
+        try:
+            response = client.chat.completions.create(
+                model=AZURE_OPENAI_MODEL,
+                messages=st.session_state.messages,
+                tools=available_tools if available_tools else None
+            )
+            
+            response_message = response.choices[0].message
+            st.session_state.messages.append(response_message)
+            
+            # Handle tool calls
+            if response_message.tool_calls:
+                st.info("🔧 Executing Azure tasks...")
                 
-                if "error" in result:
-                    st.error(f"❌ {result['error']}")
-                else:
-                    st.success("✅ MCP Tool Response Received")
-                    st.json(result)
+                for tool_call in response_message.tool_calls:
+                    function_args = json.loads(tool_call.function.arguments)
                     
-            except Exception as e:
-                st.error(f"❌ MCP Call Failed: {str(e)}")
-
-# --- ALTERNATIVE: Manual MCP Server Management ---
-st.subheader("🔧 3. Manual MCP Server Management")
-
-col1, col2 = st.columns(2)
-
-with col1:
-    if st.button("▶️ Start MCP Server"):
-        if 'mcp_process' not in st.session_state:
-            try:
-                cmd_parts = MCP_SERVER_COMMAND.split()
-                process = subprocess.Popen(
-                    cmd_parts,
-                    stdin=subprocess.PIPE,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                    text=True
+                    # Call MCP tool
+                    result = run_async_in_streamlit(
+                        call_mcp_tool_async(tool_call.function.name, function_args)
+                    )
+                    
+                    # Add tool response
+                    st.session_state.messages.append({
+                        "tool_call_id": tool_call.id,
+                        "role": "tool",
+                        "name": tool_call.function.name,
+                        "content": json.dumps(result),
+                    })
+                
+                # Get final response
+                final_response = client.chat.completions.create(
+                    model=AZURE_OPENAI_MODEL,
+                    messages=st.session_state.messages,
+                    tools=available_tools if available_tools else None
                 )
-                st.session_state.mcp_process = process
-                st.success("✅ MCP Server Started")
-            except Exception as e:
-                st.error(f"❌ Failed to start MCP server: {str(e)}")
-        else:
-            st.warning("⚠️ MCP Server already running")
+                
+                final_message = final_response.choices[0].message
+                st.session_state.messages.append(final_message)
+            
+        except Exception as e:
+            st.error(f"Error: {e}")
 
-with col2:
-    if st.button("⏹️ Stop MCP Server"):
-        if 'mcp_process' in st.session_state:
-            try:
-                st.session_state.mcp_process.terminate()
-                del st.session_state.mcp_process
-                st.success("✅ MCP Server Stopped")
-            except Exception as e:
-                st.error(f"❌ Failed to stop MCP server: {str(e)}")
-        else:
-            st.warning("⚠️ No MCP Server running")
+# Display chat messages
+for message in st.session_state.messages:
+    if message["role"] == "user":
+        with st.chat_message("user"):
+            st.write(message["content"])
+    elif message["role"] == "assistant" and hasattr(message, 'content') and message.content:
+        with st.chat_message("assistant"):
+            st.write(message.content)
 
-# Server status
-if 'mcp_process' in st.session_state:
-    if st.session_state.mcp_process.poll() is None:
-        st.success("🟢 MCP Server Status: Running")
-    else:
-        st.error("🔴 MCP Server Status: Stopped")
-        del st.session_state.mcp_process
+# Clear chat button
+if st.button("🗑️ Clear Chat"):
+    st.session_state.messages = []
+    st.rerun()
 
 st.markdown("---")
-st.caption("Built with 🤖 PyAirbyte, Azure Blob & MCP | Streamlit UI Demo")
+st.caption("Built with 🤖 Azure OpenAI, Azure MCP & Streamlit")
