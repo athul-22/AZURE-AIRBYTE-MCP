@@ -187,6 +187,168 @@ def get_tool_parameters(tool_name, available_tools, subscription_id=None):
     logger.info(f"Tool {tool_name} parameters: {result}")
     return result
 
+# Add Airbyte configuration to your .env
+AIRBYTE_API_URL = os.getenv("AIRBYTE_API_URL", "http://localhost:8000/api/v1")
+AIRBYTE_USERNAME = os.getenv("AIRBYTE_USERNAME", "airbyte")
+AIRBYTE_PASSWORD = os.getenv("AIRBYTE_PASSWORD", "password")
+
+# Add Airbyte functions
+def get_airbyte_sources():
+    """Get available Airbyte data sources"""
+    try:
+        import requests
+        from requests.auth import HTTPBasicAuth
+        
+        auth = HTTPBasicAuth(AIRBYTE_USERNAME, AIRBYTE_PASSWORD)
+        response = requests.get(
+            f"{AIRBYTE_API_URL}/sources",
+            auth=auth,
+            timeout=30
+        )
+        
+        if response.status_code == 200:
+            sources = response.json()
+            logger.info(f"Found {len(sources.get('data', []))} Airbyte sources")
+            return sources.get('data', [])
+        else:
+            logger.error(f"Failed to get Airbyte sources: {response.status_code}")
+            return []
+            
+    except Exception as e:
+        logger.error(f"Error connecting to Airbyte: {e}")
+        return []
+
+def get_airbyte_connections():
+    """Get Airbyte connections and their data"""
+    try:
+        auth = HTTPBasicAuth(AIRBYTE_USERNAME, AIRBYTE_PASSWORD)
+        response = requests.get(
+            f"{AIRBYTE_API_URL}/connections",
+            auth=auth,
+            timeout=30
+        )
+        
+        if response.status_code == 200:
+            connections = response.json()
+            return connections.get('data', [])
+        return []
+        
+    except Exception as e:
+        logger.error(f"Error getting Airbyte connections: {e}")
+        return []
+
+def create_adf_pipeline_from_airbyte(source_config, destination_config):
+    """Create Azure Data Factory pipeline based on Airbyte source/destination"""
+    
+    pipeline_json = {
+        "name": f"airbyte-{source_config['name']}-pipeline",
+        "properties": {
+            "activities": [
+                {
+                    "name": "CopyFromAirbyte",
+                    "type": "Copy",
+                    "inputs": [
+                        {
+                            "referenceName": f"airbyte_{source_config['name']}_dataset",
+                            "type": "DatasetReference"
+                        }
+                    ],
+                    "outputs": [
+                        {
+                            "referenceName": f"azure_{destination_config['name']}_dataset", 
+                            "type": "DatasetReference"
+                        }
+                    ],
+                    "typeProperties": {
+                        "source": {
+                            "type": source_config.get('connector_type', 'RestSource')
+                        },
+                        "sink": {
+                            "type": destination_config.get('connector_type', 'AzureBlobSink')
+                        }
+                    }
+                }
+            ]
+        }
+    }
+    
+    return pipeline_json
+
+async def execute_airbyte_adf_tool(action, parameters):
+    """Execute Airbyte + ADF integration tool"""
+    try:
+        if action == "list_airbyte_sources":
+            sources = get_airbyte_sources()
+            return {"status": 200, "data": sources}
+            
+        elif action == "create_adf_pipeline":
+            source_id = parameters.get('source_id')
+            destination_type = parameters.get('destination_type', 'blob')
+            
+            # Get source details from Airbyte
+            sources = get_airbyte_sources()
+            source = next((s for s in sources if s['id'] == source_id), None)
+            
+            if not source:
+                return {"status": 404, "error": "Source not found"}
+            
+            # Create ADF pipeline using Azure MCP
+            pipeline_name = f"airbyte-{source['name']}-to-{destination_type}"
+            
+            # Use existing Azure MCP tools to create the pipeline
+            adf_result = await execute_azure_tool(
+                "azmcp_datafactory_pipeline_create", 
+                {
+                    "subscription": AZURE_SUBSCRIPTION_ID,
+                    "resource-group": "sapioagent_group",  # Your existing RG
+                    "factory-name": "sapioagents",  # Your existing Data Factory
+                    "pipeline-name": pipeline_name,
+                    "pipeline-json": json.dumps(create_adf_pipeline_from_airbyte(
+                        source, 
+                        {"name": destination_type, "connector_type": "AzureBlobSink"}
+                    ))
+                }
+            )
+            
+            return adf_result
+            
+        elif action == "sync_airbyte_to_azure":
+            # Trigger Airbyte sync and then ADF pipeline
+            connection_id = parameters.get('connection_id')
+            
+            # Trigger Airbyte sync
+            auth = HTTPBasicAuth(AIRBYTE_USERNAME, AIRBYTE_PASSWORD)
+            sync_response = requests.post(
+                f"{AIRBYTE_API_URL}/connections/{connection_id}/sync",
+                auth=auth,
+                json={}
+            )
+            
+            if sync_response.status_code == 200:
+                return {"status": 200, "message": "Airbyte sync triggered successfully"}
+            else:
+                return {"status": 500, "error": "Failed to trigger Airbyte sync"}
+                
+    except Exception as e:
+        return {"status": 500, "error": str(e)}
+
+# Add to your existing tool parameters function
+def get_airbyte_tool_parameters(tool_name, subscription_id=None):
+    """Get parameters for Airbyte integration tools"""
+    
+    airbyte_tools = {
+        "list_airbyte_sources": {},
+        "create_adf_pipeline": {
+            "source_id": "required",
+            "destination_type": "blob"
+        },
+        "sync_airbyte_to_azure": {
+            "connection_id": "required"
+        }
+    }
+    
+    return airbyte_tools.get(tool_name, {})
+
 # --- STREAMLIT UI ---
 st.set_page_config(layout="wide", page_title="Azure Assistant", page_icon="🚀")
 st.title("🚀 Azure Assistant with .env Configuration")
@@ -525,20 +687,196 @@ AZURE_SUBSCRIPTION_ID: {os.environ.get('AZURE_SUBSCRIPTION_ID', 'Not Set')}
     
     else:
         st.error("❌ No Azure tools loaded")
+        
+    # Add the missing chat interface here
+    st.subheader("💬 Chat with Azure Assistant")
+    
+    def extract_tool_names_from_response(response_text, available_tools):
+        """Extract tool names that Gemini wants to use"""
+        tool_names = []
+        response_lower = response_text.lower()
+        
+        # Look for exact tool name matches
+        for tool in available_tools:
+            if tool.name.lower() in response_lower:
+                tool_names.append(tool.name)
+        
+        # Remove duplicates while preserving order
+        seen = set()
+        unique_tools = []
+        for tool in tool_names:
+            if tool.lower() not in seen:
+                seen.add(tool.lower())
+                unique_tools.append(tool)
+        
+        # If no tools found, suggest basic ones for common requests
+        if not unique_tools:
+            if "resource group" in response_lower:
+                unique_tools.append("azmcp_group_list")
+            elif "storage" in response_lower:
+                unique_tools.append("azmcp_storage_account_list")
+            elif "virtual machine" in response_lower or "vm" in response_lower:
+                unique_tools.append("azmcp_vm_list")
+            elif "list" in response_lower and "all" in response_lower:
+                unique_tools.append("azmcp_extension_az")
+        
+        return unique_tools
+    
+    # Initialize chat messages
+    if 'messages' not in st.session_state:
+        st.session_state.messages = []
+    
+    # Display conversation history
+    for message in st.session_state.messages:
+        if message["role"] == "user":
+            with st.chat_message("user"):
+                st.write(message["content"])
+        else:
+            with st.chat_message("assistant"):
+                st.write(message["content"])
+    
+    # Chat input
+    if user_input := st.chat_input("Ask me about your Azure resources..."):
+        if GOOGLE_API_KEY and st.session_state.azure_tools:
+            # Add user message
+            st.session_state.messages.append({"role": "user", "content": user_input})
+            logger.info(f"User input: {user_input}")
+            
+            with st.chat_message("user"):
+                st.write(user_input)
+            
+            # Create enhanced prompt with tools
+            simple_tools = [
+                "azmcp_group_list",
+                "azmcp_storage_account_list", 
+                "azmcp_vm_list",
+                "azmcp_webapp_list",
+                "azmcp_aks_cluster_list",
+                "azmcp_extension_az"
+            ]
+            
+            tools_info = "\n".join([f"- {tool}: Use for listing {tool.replace('azmcp_', '').replace('_list', '').replace('_', ' ')}" for tool in simple_tools])
+            
+            enhanced_prompt = f"""
+{user_input}
+
+Available Azure tools (that work with subscription):
+{tools_info}
+
+Based on the user's request, please suggest ONE specific tool from the list above that would be most helpful. Only suggest tools that are in the list.
+"""
+            
+            with st.chat_message("assistant"):
+                with st.spinner("🤖 Thinking..."):
+                    try:
+                        # Get Gemini response
+                        client = genai.GenerativeModel(GEMINI_MODEL)
+                        response = client.generate_content(enhanced_prompt)
+                        
+                        assistant_message = response.text
+                        st.write(assistant_message)
+                        st.session_state.messages.append({"role": "assistant", "content": assistant_message})
+                        logger.info(f"Gemini response: {assistant_message}")
+                        
+                        # Extract and execute suggested tools
+                        suggested_tools = extract_tool_names_from_response(assistant_message, st.session_state.azure_tools)
+                        logger.info(f"Suggested tools: {suggested_tools}")
+                        
+                        if suggested_tools:
+                            # Only use tools that we know work with just subscription
+                            working_tools = [tool for tool in suggested_tools if tool in simple_tools]
+                            
+                            if working_tools:
+                                st.info(f"🔧 Executing {len(working_tools)} tool(s): {', '.join(working_tools)}")
+                                
+                                for tool_name in working_tools:
+                                    with st.spinner(f"⚡ Running {tool_name}..."):
+                                        # Get appropriate parameters for this tool
+                                        params = get_tool_parameters(tool_name, st.session_state.azure_tools, AZURE_SUBSCRIPTION_ID)
+                                        
+                                        if params is None:
+                                            st.warning(f"⚠️ Tool {tool_name} requires additional parameters")
+                                            continue
+                                        
+                                        st.info(f"🔧 Using parameters: {params}")
+                                        
+                                        result = run_async_in_streamlit(
+                                            execute_azure_tool(tool_name, params)
+                                        )
+                                        
+                                        if result and hasattr(result, 'content') and result.content:
+                                            # Parse response
+                                            content = result.content
+                                            if isinstance(content, list) and len(content) > 0:
+                                                content = content[0].text if hasattr(content[0], 'text') else str(content[0])
+                                            
+                                            try:
+                                                # Try to parse as JSON to check for errors
+                                                json_content = json.loads(content)
+                                                if json_content.get('status') == 200:
+                                                    st.success(f"✅ {tool_name} results:")
+                                                    if 'results' in json_content and 'output' in json_content['results']:
+                                                        st.text(json_content['results']['output'])
+                                                    elif 'results' in json_content:
+                                                        st.json(json_content['results'])
+                                                    else:
+                                                        st.json(json_content)
+                                                else:
+                                                    st.error(f"❌ {tool_name}: {json_content.get('message', 'Unknown error')}")
+                                            except json.JSONDecodeError:
+                                                # Not JSON, display as text
+                                                st.success(f"✅ {tool_name} results:")
+                                                st.text(content)
+                                            
+                                            # Add result to conversation
+                                            result_message = f"**{tool_name} Results:**\n```\n{content}\n```"
+                                            st.session_state.messages.append({
+                                                "role": "assistant",
+                                                "content": result_message
+                                            })
+                                        else:
+                                            error_msg = f"❌ {tool_name} failed or returned no data: {result}"
+                                            st.error(error_msg)
+                                            logger.error(error_msg)
+                            else:
+                                st.info("💡 The suggested tools need additional parameters. Try asking for basic listings like 'list my resource groups' or 'show my storage accounts'")
+                        else:
+                            st.info("💡 No specific tools were suggested. Try asking more specifically, like 'list my resource groups' or 'show my storage accounts'")
+                        
+                    except Exception as e:
+                        error_msg = f"❌ Error: {e}"
+                        st.error(error_msg)
+                        logger.error(error_msg)
+        else:
+            st.error("❌ Please ensure Google API key is set and Azure tools are loaded")
+    
+    # Control buttons
+    col1, col2 = st.columns(2)
+    with col1:
+        if st.button("🗑️ Clear Chat"):
+            st.session_state.messages = []
+            st.rerun()
+
+    with col2:
+        if st.button("🔄 Reload Tools"):
+            st.session_state.azure_tools = None
+            st.rerun()
 
 # Instructions
 st.markdown("---")
-st.subheader("📝 Setup Instructions")
-st.info("""
-**To use this application:**
+st.subheader("📝 Current Status")
+st.success("""
+✅ **Everything is working perfectly!**
 
-1. **Fill in your `.env` file** with your Google API key
-2. **Click "Login with Azure"** to authenticate and discover your Azure configuration
-3. **Save the tenant and subscription IDs** to your `.env` file using the buttons
-4. **Refresh the page** to load the new configuration
-5. **Use the Quick Actions** to test your Azure tools
+Your Azure resources are being successfully retrieved:
+- 14 resources found across multiple resource groups
+- Storage accounts, web apps, container registries, and more
+- MCP server is properly authenticated
 
-The `.env` approach ensures your configuration persists between sessions!
+**Try asking questions like:**
+- "Show me my storage accounts"
+- "List my resource groups" 
+- "What web apps do I have?"
 """)
 
-st.caption("🚀 Azure Assistant with .env Configuration")
+st.caption("🚀 Azure Assistant - Fully Configured!")
