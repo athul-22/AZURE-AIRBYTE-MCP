@@ -4,3 +4,4 @@ openai
 logging
 requests
 pydantic
+fastapi
