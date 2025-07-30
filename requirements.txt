@@ -2,3 +2,4 @@ mcp
 azure-identity
 openai
 logging
+requests
